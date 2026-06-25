@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+twilio
+groq
+deepgram-sdk
+httpx
+python-dotenv
+websockets
