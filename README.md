@@ -1,66 +1,33 @@
 # AI Calling Agent
-Google Form → FastAPI → Twilio → Deepgram STT → Groq LLM → Deepgram TTS
+Automatically calls leads the moment they submit a Google Form.
+Built with FastAPI, Twilio, Deepgram (STT + TTS), and Groq LLM.
 
-## Stack
+## How it works
+1. Lead fills Google Form with phone number
+2. Apps Script fires webhook to FastAPI server
+3. Server triggers Twilio outbound call
+4. Call connects via WebSocket media stream
+5. Deepgram nova-2 transcribes speech in real-time
+6. Groq llama-3.3-70b generates response
+7. Deepgram Aura Asteria speaks the reply back
+
+## Tech Stack
 - FastAPI + uvicorn
-- Twilio (outbound call + media streams)
+- Twilio Programmable Voice + Media Streams
 - Deepgram nova-2 (STT) + Aura Asteria (TTS)
-- Groq llama-3.3-70b (LLM brain)
+- Groq llama-3.3-70b (LLM)
+- Google Forms + Apps Script
 
 ## Setup
+1. Clone the repo
+2. Copy .env.example to .env and fill in your keys
+3. pip install -r requirements.txt
+4. Run ngrok: ngrok http 8000
+5. Update SERVER_URL in .env with ngrok URL
+6. uvicorn main:app --port 8000 --reload
+7. Set up Google Form trigger using apps_script.js
 
-### 1. Install dependencies
-```bash
-pip install -r requirements.txt
-```
-
-### 2. Configure .env
-```bash
-cp .env.example .env
-# Fill in all keys
-```
-
-### 3. Get your keys
-- Twilio: https://console.twilio.com → Account SID + Auth Token + buy a number
-- Groq: https://console.groq.com → API Keys
-- Deepgram: https://console.deepgram.com → API Keys (free $200 credits)
-
-### 4. Run ngrok (for dev)
-```bash
-ngrok http 8000
-# Copy the https URL → paste as SERVER_URL in .env
-```
-
-### 5. Start the server
-```bash
-uvicorn main:app --port 8000 --reload
-```
-
-### 6. Google Form setup
-1. Open your Google Form
-2. Extensions → Apps Script
-3. Paste contents of apps_script.js
-4. Replace WEBHOOK_URL with your ngrok URL + /form-submit
-5. Save → Triggers → Add trigger:
-   - Function: onFormSubmit
-   - Event source: From form
-   - Event type: On form submit
-
-### 7. Test
-Submit your form with a verified phone number → you'll get a call in seconds!
-
-## For Indian numbers (Jio/Airtel etc.)
-- Twilio trial accounts can ONLY call verified numbers
-  Go to Twilio Console → Phone Numbers → Verified Caller IDs → add your number
-- Numbers are auto-formatted to +91XXXXXXXXXX in main.py
-- If your form field name is different, update the `data.get(...)` lines in /form-submit
-
-## Customize the agent
-Edit SYSTEM_PROMPT in main.py to match your exact use case.
-Keep instructions short — the LLM replies in 2 sentences max.
-
-## Voices available (change in deepgram_tts function)
-- aura-asteria-en   → female, warm, most natural ✅ (current)
-- aura-orion-en     → male, clear
-- aura-zeus-en      → male, deep
-- aura-luna-en      → female, soft
+## Get API Keys
+- Twilio: https://console.twilio.com
+- Groq: https://console.groq.com (free)
+- Deepgram: https://console.deepgram.com (free $200 credits)

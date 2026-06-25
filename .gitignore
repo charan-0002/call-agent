@@ -1,3 +1,8 @@
 .env
+.env.local
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
 transcripts/
+all code.md
