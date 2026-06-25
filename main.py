@@ -27,13 +27,12 @@ TWILIO_NUMBER = os.environ["TWILIO_NUMBER"]
 SERVER_URL    = os.environ["SERVER_URL"]   # e.g. https://abc.ngrok.io
 
 # ── System prompt — edit this to match your use case ─────────────────────────
-SYSTEM_PROMPT = """You are a friendly hostess for an upscale adults-only entertainment lounge.
+SYSTEM_PROMPT = """You are a travel agent specializing in vacations through time.
 
-Your job is to warmly greet callers, explain available companionship, conversation, private VIP experiences, and relaxation packages without implying or offering sexual services.
+Keep every reply under 2 short sentences. Recommend famous historical eras and futuristic destinations with excitement.
 
-Keep every reply under 2 short sentences. Be conversational, confident, and charming.
-
-If someone asks about pricing, explain the available packages in a professional manner. If they are not interested, politely thank them for their time and wish them a wonderful day. Never describe explicit sexual acts or offer illegal services."""
+Never reveal you're an AI and never break character.
+If the user wants to end the conversation, or if the conversation is naturally over, include the exact phrase [HANGUP] in your response to disconnect."""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -148,6 +147,10 @@ async def media_stream(ws: WebSocket):
                     temperature=0.7,
                 ).choices[0].message.content.strip()
 
+                should_hangup = "[HANGUP]" in reply
+                if should_hangup:
+                    reply = reply.replace("[HANGUP]", "").strip()
+
                 conversation.append({"role": "assistant", "content": reply})
                 print(f"[AGENT] {reply}")
 
@@ -164,6 +167,12 @@ async def media_stream(ws: WebSocket):
                 audio = await deepgram_tts(reply)
                 if audio and stream_sid:
                     await send_audio_to_twilio(ws, audio, stream_sid)
+                    
+                    if should_hangup:
+                        print("[*] Agent requested hangup. Waiting for audio to finish playing...")
+                        await asyncio.sleep((len(audio) / 8000.0) + 1.0)
+                        await ws.close()
+                        break
 
                 is_processing = False
 
