@@ -1,7 +1,8 @@
-import os, json, asyncio, base64, httpx
+import os, json, asyncio, base64, httpx, difflib
 from datetime import datetime
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import Response
+from pydantic import BaseModel
 from twilio.rest import Client
 from twilio.twiml.voice_response import VoiceResponse, Connect
 from groq import Groq
@@ -9,14 +10,39 @@ from deepgram import (
     DeepgramClient,
     LiveTranscriptionEvents,
     LiveOptions,
-    DeepgramClientOptions,
 )
 from deepgram.clients.listen import LiveTranscriptionEvents
 from dotenv import load_dotenv
+from fastapi.middleware.cors import CORSMiddleware
+from database import get_db, init_db
+from menu import MENU
 
 load_dotenv()
 
 app = FastAPI()
+
+class CallRequest(BaseModel):
+    table_number: int
+
+# Hardcoded for Twilio Trial
+CUSTOMER_PHONE = "+917483691261"
+
+def get_best_match(name, choices):
+    matches = difflib.get_close_matches(name, choices, n=1, cutoff=0.5)
+    return matches[0] if matches else None
+
+# Enable CORS for the React frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.on_event("startup")
+def startup_event():
+    init_db()
 
 # ── Clients ──────────────────────────────────────────────────────────────────
 twilio_client = Client(os.environ["TWILIO_SID"], os.environ["TWILIO_TOKEN"])
@@ -28,98 +54,101 @@ SERVER_URL    = os.environ["SERVER_URL"]   # e.g. https://abc.ngrok.io
 
 # ── System prompt — edit this to match your use case ─────────────────────────
 SYSTEM_PROMPT = """# ROLE AND PERSONA
-You are Chronos, an elite, highly knowledgeable, and charismatic Time-Travel Agent working for Epoch Escapes. Your job is to curate, recommend, and book extraordinary vacations across the past, present, and future. You are a seasoned temporal guide—enthusiastic about history and futuristic sci-fi destinations, yet highly professional about temporal safety protocols. 
+You are a friendly and professional waiter at "The Grand Azure," an upscale restaurant.
+Your job is to greet the guest, take their order, and recommend special dishes if asked.
+Tone: Warm, polite, and helpful.
 
-CRITICAL RULES:
-1. Never reveal you're an AI.
-2. Recommend famous historical eras and futuristic destinations.
-3. Keep the conversation moving forward by always asking a relevant follow-up question.
-4. If the user becomes hostile, attempts to break temporal laws, or wishes to end the conversation, output exactly: [HANGUP].
+# CRITICAL CONVERSATION RULES
+1. ONE QUESTION LIMIT: End every response with exactly ONE question to hand the conversation back to the user.
+2. CONCISENESS: Keep your responses under 2 sentences so they are easily spoken over the phone.
+3. AI CONCEALMENT: Never reveal you are an AI. You are a human waiter.
+4. TERMINATION: If the user wishes to finish their order or end the conversation, output exactly: [HANGUP]
 
-# TONE AND STYLE
-- Conversational, witty, and immersive. 
-- Balance the awe of time travel with the practicalities of a standard travel agency.
-- Be descriptive and vivid when describing eras, painting a picture of the sights, sounds, and smells.
-- Maintain an air of exclusivity; time travel is a premium service.
+# MENU KNOWLEDGE
+- Special Dishes: Truffle Butter Filet Mignon, Pan-Seared Scallops with Lemon Risotto, and our famous Molten Chocolate Lava Cake.
+- Drinks: We have a full bar, freshly squeezed juices, and artisanal coffees.
 
-# CORE RESPONSIBILITIES
-1. Needs Assessment: Ask engaging questions to determine the client's interests (e.g., "Are you looking for the serene philosophy of Ancient Athens, or the neon-soaked thrill of Neo-Tokyo in 2150?").
-2. Era Recommendations: Suggest 2-3 tailored temporal destinations based on the user's preferences. Include specific years or centuries.
-3. Itinerary Planning: Build detailed, multi-day itineraries including accommodation, dining, and daily excursions.
-4. Temporal Briefings: Remind clients of local customs, necessary currency, and required attire.
-
-# STRICT TEMPORAL RULES (IN-UNIVERSE)
-- The Butterfly Effect Rule: Constantly remind clients not to step on insects, interact with direct ancestors, or leave modern technology behind.
-- Paradox Prevention: Warn clients that attempting to change major historical events will result in immediate extraction and a non-refundable fine.
-- Vaccinations: Casually mention required temporal immunizations (e.g., Black Plague boosters, Cyber-virus firewalls).
-
-# RESPONSE GUIDELINES
-- Structure your responses clearly using bullet points and short paragraphs for readability.
-- Be direct and engaging, avoiding unnecessary rambling.
-- When the client confirms a booking, generate a "Temporal Ticket" summarizing the trip details, era, and safety warnings."""
+# CONVERSATIONAL FLOW
+1. Greet the guest warmly and ask if they are ready to order or if they'd like to hear the specials.
+2. Answer any questions about the menu or take their order.
+3. Once they order, confirm the items and ask if they need anything else (like drinks or dessert).
+4. When they say they are done, thank them, tell them their food will be right out, and output [HANGUP]."""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. Google Form webhook — receives phone number, fires the call
+# 1. API Endpoints
 # ─────────────────────────────────────────────────────────────────────────────
-@app.post("/form-submit")
-async def form_submit(request: Request):
-    data = await request.json()
+@app.post("/call")
+async def call_table(request: CallRequest):
+    table_number = request.table_number
+    
+    # Mark table as occupied
+    conn = get_db()
+    conn.execute("UPDATE tables SET status = 'Occupied' WHERE id = ?", (table_number,))
+    conn.commit()
+    conn.close()
 
-    # Try common field names — update to match your exact Google Form field
-    phone = (
-        data.get("Phone Number")
-        or data.get("phone")
-        or data.get("Mobile Number")
-        or data.get("Contact Number")
-    )
-
-    if not phone:
-        return {"status": "error", "msg": "No phone field found in form data"}
-
-    # Normalize Indian numbers to E.164 format
-    phone = phone.strip().replace(" ", "").replace("-", "")
-    if phone.startswith("0"):
-        phone = "+91" + phone[1:]
-    elif not phone.startswith("+"):
-        phone = "+91" + phone
-
-    make_call(phone)
-    return {"status": "ok", "calling": phone}
-
-
-def make_call(to_number: str):
     twilio_client.calls.create(
-        to=to_number,
+        to=CUSTOMER_PHONE,
         from_=TWILIO_NUMBER,
-        url=f"{SERVER_URL}/call-twiml",
+        url=f"{SERVER_URL}/call-twiml/{table_number}",
     )
-    print(f"[CALL] Dialing {to_number}")
+    print(f"[CALL] Dialing {CUSTOMER_PHONE} for Table {table_number}")
+    return {"status": "ok", "table": table_number}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. Twilio fetches TwiML — tells Twilio to open a media stream WebSocket
-# ─────────────────────────────────────────────────────────────────────────────
-@app.api_route("/call-twiml", methods=["GET", "POST"])
-async def call_twiml():
+@app.api_route("/call-twiml/{table_number}", methods=["GET", "POST"])
+async def call_twiml(table_number: int):
     resp = VoiceResponse()
     connect = Connect()
     ws_url = SERVER_URL.replace("https://", "wss://").replace("http://", "ws://")
-    connect.stream(url=f"{ws_url}/media-stream")
+    connect.stream(url=f"{ws_url}/media-stream/{table_number}")
     resp.append(connect)
     return Response(content=str(resp), media_type="application/xml")
+
+
+@app.get("/api/tables")
+def get_tables():
+    conn = get_db()
+    tables = conn.execute("SELECT * FROM tables").fetchall()
+    conn.close()
+    return [dict(t) for t in tables]
+
+
+@app.get("/api/tables/{table_id}")
+def get_table_details(table_id: int):
+    conn = get_db()
+    orders = conn.execute("SELECT * FROM orders WHERE table_id = ?", (table_id,)).fetchall()
+    transcript = conn.execute("SELECT text FROM transcripts WHERE table_id = ? ORDER BY id DESC LIMIT 1", (table_id,)).fetchone()
+    conn.close()
+    return {
+        "orders": [dict(o) for o in orders],
+        "transcript": transcript["text"] if transcript else None
+    }
+
+
+@app.post("/api/tables/{table_id}/checkout")
+def checkout_table(table_id: int):
+    conn = get_db()
+    conn.execute("DELETE FROM orders WHERE table_id = ?", (table_id,))
+    conn.execute("DELETE FROM transcripts WHERE table_id = ?", (table_id,))
+    conn.execute("UPDATE tables SET status = 'Available' WHERE id = ?", (table_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "ok"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. WebSocket — real-time audio bridge
 #    Twilio ↔ Deepgram STT → Groq LLM → Deepgram TTS → Twilio
 # ─────────────────────────────────────────────────────────────────────────────
-@app.websocket("/media-stream")
-async def media_stream(ws: WebSocket):
+@app.websocket("/media-stream/{table_number}")
+async def media_stream(ws: WebSocket, table_number: int):
     await ws.accept()
-    print("[WS] Call connected")
+    print(f"[WS] Call connected for Table {table_number}")
 
-    conversation     = [{"role": "system", "content": SYSTEM_PROMPT}]
+    dynamic_prompt = SYSTEM_PROMPT + f"\n\nIMPORTANT: You are currently serving Table {table_number}."
+    conversation     = [{"role": "system", "content": dynamic_prompt}]
     transcript_parts = []
     stream_sid       = None
     is_processing    = False  # prevent overlapping LLM calls
@@ -212,7 +241,7 @@ async def media_stream(ws: WebSocket):
                 stream_sid = msg["start"]["streamSid"]
                 print(f"[TWILIO] Stream started: {stream_sid}")
                 # Now send opening since we have stream_sid
-                opening = "Hi! I'm calling regarding your recent enquiry. Are you interested in learning more about our service?"
+                opening = f"Welcome to The Grand Azure! I'm your AI waiter for Table {table_number}. Ready to order?"
                 audio = await deepgram_tts(opening)
                 if audio:
                     await send_audio_to_twilio(ws, audio, stream_sid)
@@ -231,21 +260,52 @@ async def media_stream(ws: WebSocket):
         await dg_conn.finish()
         print("[WS] Disconnected")
 
-        # Save the conversation transcript to a unique file
+        # Save the conversation transcript and extract orders
         if stream_sid and len(conversation) > 1:
-            os.makedirs("transcripts", exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"transcripts/call_{timestamp}_{stream_sid}.txt"
-            with open(filename, "w", encoding="utf-8") as f:
-                f.write("FULL CONVERSATION TRANSCRIPT\n")
-                f.write("="*50 + "\n")
-                for msg in conversation:
-                    if msg["role"] == "user":
-                        f.write(f"YOU  : {msg['content']}\n")
-                    elif msg["role"] == "assistant":
-                        f.write(f"AGENT: {msg['content']}\n")
-                f.write("="*50 + "\n")
-            print(f"[*] Transcript permanently saved to {filename}")
+            transcript_text = "\n".join([f"{m['role'].upper()}: {m['content']}" for m in conversation if m['role'] != 'system'])
+            
+            # Extract orders using Groq
+            extraction_prompt = f"""You are a JSON extractor. Analyze this restaurant conversation.
+Extract a strict JSON array of items the customer ordered. Do not include items they didn't explicitly order.
+Example format: [{{"item": "Masala Dosa", "qty": 2}}]
+If nothing was ordered, return [].
+Do NOT wrap in markdown blocks, return ONLY raw JSON.
+
+Transcript:
+{transcript_text}"""
+            
+            try:
+                extract_res = groq_client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=[{"role": "user", "content": extraction_prompt}],
+                    temperature=0.0
+                ).choices[0].message.content.strip()
+                
+                # Strip markdown code blocks if the LLM still includes them
+                if extract_res.startswith("```"):
+                    extract_res = extract_res.split("```")[1].replace("json\n", "").strip()
+                
+                orders = json.loads(extract_res)
+                
+                conn = get_db()
+                c = conn.cursor()
+                c.execute("INSERT INTO transcripts (table_id, text) VALUES (?, ?)", (table_number, transcript_text))
+                
+                menu_keys = list(MENU.keys())
+                for o in orders:
+                    item = o.get("item")
+                    qty = o.get("qty", 1)
+                    if item:
+                        match = get_best_match(item, menu_keys)
+                        if match:
+                            price = MENU[match]
+                            c.execute("INSERT INTO orders (table_id, item_name, quantity, price) VALUES (?, ?, ?, ?)",
+                                      (table_number, match, qty, price))
+                conn.commit()
+                conn.close()
+                print(f"[*] Extraction complete for Table {table_number}")
+            except Exception as e:
+                print(f"[EXTRACTION ERROR] {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
